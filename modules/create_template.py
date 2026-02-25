@@ -1,103 +1,115 @@
 """
-Script to create the pre-prepared COA Word template for docxtpl.
+Script to create example COA Word templates for docxtpl.
 
-Run this script once to generate the template file:
+Generates two templates:
+    1. ``coa_template.docx`` — a simple template with Jinja2 placeholders
+       matching the predefined COA section keys.
+    2. Can be used as a starting point for users to customise.
+
+Run:
     python -m modules.create_template
 """
 
 import os
 
 from docx import Document
-from docx.shared import Pt, Inches, RGBColor
+from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+from modules.coa_structure import COA_SECTIONS, COA_FIELD_KEYS
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
 TEMPLATE_PATH = os.path.join(TEMPLATE_DIR, "coa_template.docx")
 
 
 def create_template():
-    """Create the COA template docx file with Jinja2 placeholders for docxtpl."""
+    """Create a COA template .docx with Jinja2 placeholders for docxtpl."""
     os.makedirs(TEMPLATE_DIR, exist_ok=True)
 
     doc = Document()
 
-    # Configure default font
+    # Default style
     style = doc.styles["Normal"]
-    font = style.font
-    font.name = "Times New Roman"
-    font.size = Pt(11)
+    style.font.name = "Times New Roman"
+    style.font.size = Pt(11)
 
-    # Configure page margins
+    # Page margins
     for section in doc.sections:
-        section.top_margin = Inches(0.8)
-        section.bottom_margin = Inches(0.8)
-        section.left_margin = Inches(1.0)
-        section.right_margin = Inches(0.8)
+        section.top_margin = Cm(2.0)
+        section.bottom_margin = Cm(2.0)
+        section.left_margin = Cm(2.5)
+        section.right_margin = Cm(1.5)
 
     # Title
     title_para = doc.add_paragraph()
     title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_run = title_para.add_run("{{ title }}")
-    title_run.bold = True
-    title_run.font.size = Pt(16)
-    title_run.font.name = "Times New Roman"
+    run = title_para.add_run("СЕРТИФИКАТ АНАЛИЗА")
+    run.bold = True
+    run.font.size = Pt(16)
+    run.font.name = "Times New Roman"
 
     # Subtitle
-    subtitle_para = doc.add_paragraph()
-    subtitle_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    sub_run = subtitle_para.add_run("{{ subtitle }}")
-    sub_run.font.size = Pt(12)
-    sub_run.font.name = "Times New Roman"
-    sub_run.font.color.rgb = RGBColor(100, 100, 100)
+    sub = doc.add_paragraph()
+    sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = sub.add_run("(Перевод на русский язык)")
+    r.font.size = Pt(11)
+    r.font.name = "Times New Roman"
+    r.font.color.rgb = RGBColor(100, 100, 100)
 
-    # Spacer
+    # Metadata
     doc.add_paragraph()
-
-    # Metadata section
     meta_fields = [
         ("Исходный файл:", "{{ original_filename }}"),
         ("Дата перевода:", "{{ translation_date }}"),
         ("Модель перевода:", "{{ model_used }}"),
         ("Метод извлечения:", "{{ extraction_method }}"),
     ]
-
     for label, placeholder in meta_fields:
         p = doc.add_paragraph()
-        label_run = p.add_run(label + " ")
-        label_run.bold = True
-        label_run.font.size = Pt(9)
-        label_run.font.name = "Times New Roman"
-        label_run.font.color.rgb = RGBColor(80, 80, 80)
-        val_run = p.add_run(placeholder)
-        val_run.font.size = Pt(9)
-        val_run.font.name = "Times New Roman"
-        val_run.font.color.rgb = RGBColor(80, 80, 80)
+        lr = p.add_run(f"{label} ")
+        lr.bold = True
+        lr.font.size = Pt(9)
+        lr.font.name = "Times New Roman"
+        lr.font.color.rgb = RGBColor(80, 80, 80)
+        vr = p.add_run(placeholder)
+        vr.font.size = Pt(9)
+        vr.font.name = "Times New Roman"
+        vr.font.color.rgb = RGBColor(80, 80, 80)
 
     # Divider
-    divider = doc.add_paragraph()
-    divider.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    div_run = divider.add_run("─" * 60)
-    div_run.font.size = Pt(8)
-    div_run.font.color.rgb = RGBColor(180, 180, 180)
+    div = doc.add_paragraph()
+    div.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    dr = div.add_run("─" * 70)
+    dr.font.size = Pt(7)
+    dr.font.color.rgb = RGBColor(180, 180, 180)
 
-    # Main content placeholder
-    content_para = doc.add_paragraph()
-    content_run = content_para.add_run("{{ translated_content }}")
-    content_run.font.name = "Times New Roman"
-    content_run.font.size = Pt(11)
+    # Section placeholders
+    for key, label, _desc, _is_table in COA_SECTIONS:
+        heading = doc.add_paragraph()
+        heading.paragraph_format.space_before = Pt(10)
+        heading.paragraph_format.space_after = Pt(4)
+        hr = heading.add_run(label)
+        hr.bold = True
+        hr.font.size = Pt(12)
+        hr.font.name = "Times New Roman"
+
+        content = doc.add_paragraph()
+        cr = content.add_run("{{ " + key + " }}")
+        cr.font.name = "Times New Roman"
+        cr.font.size = Pt(11)
 
     # Bottom divider
     doc.add_paragraph()
-    divider2 = doc.add_paragraph()
-    divider2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    div_run2 = divider2.add_run("─" * 60)
-    div_run2.font.size = Pt(8)
-    div_run2.font.color.rgb = RGBColor(180, 180, 180)
+    div2 = doc.add_paragraph()
+    div2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    dr2 = div2.add_run("─" * 70)
+    dr2.font.size = Pt(7)
+    dr2.font.color.rgb = RGBColor(180, 180, 180)
 
     # Disclaimer
-    disclaimer = doc.add_paragraph()
-    disclaimer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    disc_run = disclaimer.add_run(
+    disc = doc.add_paragraph()
+    disc.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    disc_run = disc.add_run(
         "Данный документ является переводом оригинального Сертификата анализа.\n"
         "Перевод выполнен с использованием искусственного интеллекта с применением\n"
         "фармацевтического глоссария. Рекомендуется верификация специалистом."
@@ -109,6 +121,9 @@ def create_template():
 
     doc.save(TEMPLATE_PATH)
     print(f"Template created at: {TEMPLATE_PATH}")
+    print(f"Sections ({len(COA_SECTIONS)}):")
+    for key, label, _, _ in COA_SECTIONS:
+        print(f"  {{{{ {key} }}}}  →  {label}")
 
 
 if __name__ == "__main__":
