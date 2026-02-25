@@ -3,14 +3,14 @@ Pharmaceutical COA Translator — Streamlit Application
 
 Upload a pharmaceutical Certificate of Analysis (COA) in PDF format,
 translate it to Russian using OpenAI with a pharmaceutical glossary,
-and download the result as a formatted Word document.
+and download the result as a fixed-structure Word document.
 """
 
 import streamlit as st
 
 from modules.pdf_extractor import extract_text_from_pdf
-from modules.translator import translate_text
-from modules.doc_generator import generate_doc_from_template
+from modules.translator import translate_text_structured
+from modules.doc_generator import generate_structured_doc
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -34,17 +34,6 @@ st.markdown(
     .main-header h1 {
         color: #1E88E5;
         font-size: 2rem;
-    }
-    .status-box {
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin: 0.5rem 0;
-    }
-    .info-metric {
-        background-color: #f0f2f6;
-        padding: 0.75rem;
-        border-radius: 0.5rem;
-        text-align: center;
     }
     </style>
     """,
@@ -71,7 +60,7 @@ with st.sidebar:
     api_key = st.text_input(
         "OpenAI API Key",
         type="password",
-        help="Enter your OpenAI API key. It is used only for the current session and never stored.",
+        help="Enter your OpenAI API key. Used only for the current session.",
     )
 
     model_choice = st.selectbox(
@@ -79,6 +68,23 @@ with st.sidebar:
         options=["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
         index=0,
         help="gpt-4o recommended for best quality pharmaceutical translations.",
+    )
+
+    st.divider()
+
+    st.subheader("Word Template (optional)")
+    user_template = st.file_uploader(
+        "Upload a .docx structure template",
+        type=["docx"],
+        help=(
+            "Upload your own Word template with Jinja2 placeholders "
+            "(e.g. {{ product_name }}, {{ test_results }}). "
+            "If not provided, the built-in fixed COA structure is used.\n\n"
+            "**Available placeholders:** document_title, company_info, "
+            "product_name, product_details, batch_info, storage_conditions, "
+            "test_results, conclusion, signatures, notes, "
+            "original_filename, translation_date, model_used, extraction_method"
+        ),
     )
 
     st.divider()
@@ -91,9 +97,10 @@ with st.sidebar:
     st.markdown(
         "**Features:**\n"
         "- Multi-method PDF extraction\n"
-        "- OCR fallback for scanned docs\n"
+        "- OCR with image preprocessing\n"
         "- 200+ pharma term glossary\n"
-        "- Formatted Word output"
+        "- Fixed-structure Word output\n"
+        "- Custom template support"
     )
 
 # ---------------------------------------------------------------------------
@@ -122,20 +129,25 @@ if uploaded_file is not None:
     # ------------------------------------------------------------------
     st.subheader("2. Extract Text")
 
-    if "extraction_result" not in st.session_state or st.session_state.get(
-        "last_file"
-    ) != uploaded_file.name:
+    if (
+        "extraction_result" not in st.session_state
+        or st.session_state.get("last_file") != uploaded_file.name
+    ):
         with st.spinner("Extracting text from PDF..."):
             extraction = extract_text_from_pdf(pdf_bytes)
             st.session_state["extraction_result"] = extraction
             st.session_state["last_file"] = uploaded_file.name
+            # Clear stale downstream state
+            st.session_state.pop("translation_result", None)
+            st.session_state.pop("doc_bytes", None)
     else:
         extraction = st.session_state["extraction_result"]
 
     if extraction["success"]:
         st.success(
-            f"Text extracted successfully using **{extraction['method']}** "
-            f"({extraction['page_count']} page(s))"
+            f"Text extracted using **{extraction['method']}** "
+            f"({extraction['page_count']} page(s), "
+            f"{len(extraction['text']):,} characters)"
         )
 
         with st.expander("Preview extracted text", expanded=False):
@@ -150,7 +162,9 @@ if uploaded_file is not None:
         st.subheader("3. Translate to Russian")
 
         if not api_key:
-            st.warning("Please enter your OpenAI API key in the sidebar to proceed.")
+            st.warning(
+                "Please enter your OpenAI API key in the sidebar to proceed."
+            )
         else:
             translate_btn = st.button(
                 "Translate to Russian",
@@ -164,17 +178,17 @@ if uploaded_file is not None:
                     status_text = st.empty()
 
                     def update_progress(current, total):
-                        pct = int(current / total * 100)
+                        pct = min(int(current / total * 100), 100)
                         progress_bar.progress(
                             pct,
-                            text=f"Translating chunk {current}/{total}...",
+                            text=f"Translating step {current}/{total}...",
                         )
                         status_text.text(
-                            f"Processing chunk {current} of {total}"
+                            f"Processing step {current} of {total}"
                         )
 
-                    with st.spinner("Translating document..."):
-                        result = translate_text(
+                    with st.spinner("Translating document (structured)..."):
+                        result = translate_text_structured(
                             text=extraction["text"],
                             api_key=api_key,
                             model=model_choice,
@@ -185,39 +199,49 @@ if uploaded_file is not None:
                     status_text.empty()
 
                     st.session_state["translation_result"] = result
+                    # Clear stale doc
+                    st.session_state.pop("doc_bytes", None)
                 else:
                     result = st.session_state["translation_result"]
 
                 if result["success"]:
                     st.success(
-                        f"Translation complete! Model: **{result['model_used']}**, "
-                        f"Chunks: **{result['chunks_translated']}**"
+                        f"Translation complete! Model: **{result['model_used']}**"
                     )
 
-                    with st.expander("Preview translated text", expanded=False):
+                    with st.expander(
+                        "Preview translated text", expanded=False
+                    ):
                         preview_ru = result["translated_text"][:3000]
                         if len(result["translated_text"]) > 3000:
-                            preview_ru += "\n\n... [сокращено для предварительного просмотра]"
+                            preview_ru += (
+                                "\n\n... [сокращено для предварительного "
+                                "просмотра]"
+                            )
                         st.text(preview_ru)
 
-                    # ----------------------------------------------------------
+                    # ------------------------------------------------------
                     # Step 4: Generate & Download Word doc
-                    # ----------------------------------------------------------
+                    # ------------------------------------------------------
                     st.subheader("4. Download Word Document")
 
                     if "doc_bytes" not in st.session_state or translate_btn:
                         with st.spinner("Generating Word document..."):
-                            doc_bytes = generate_doc_from_template(
-                                translated_text=result["translated_text"],
+                            template_bytes = None
+                            if user_template:
+                                template_bytes = user_template.read()
+
+                            doc_bytes = generate_structured_doc(
+                                sections=result.get("sections", {}),
                                 original_filename=uploaded_file.name,
                                 extraction_method=extraction["method"],
                                 model_used=result["model_used"],
+                                user_template_bytes=template_bytes,
                             )
                             st.session_state["doc_bytes"] = doc_bytes
                     else:
                         doc_bytes = st.session_state["doc_bytes"]
 
-                    # Output filename
                     base_name = uploaded_file.name.rsplit(".", 1)[0]
                     output_filename = f"{base_name}_RU.docx"
 
@@ -225,15 +249,18 @@ if uploaded_file is not None:
                         label="Download Translated COA (.docx)",
                         data=doc_bytes,
                         file_name=output_filename,
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument"
+                            ".wordprocessingml.document"
+                        ),
                         type="primary",
                         use_container_width=True,
                     )
 
                     st.info(
-                        "The translated document is ready for download. "
-                        "We recommend having a qualified pharmaceutical specialist "
-                        "review the translation before official use."
+                        "The document follows a fixed COA structure with "
+                        "predefined sections. We recommend having a "
+                        "pharmaceutical specialist review the translation."
                     )
 
                 else:
@@ -256,7 +283,8 @@ if uploaded_file is not None:
             "Tips:\n"
             "- Ensure the PDF is not password-protected\n"
             "- Try a different PDF if the file seems corrupted\n"
-            "- For scanned documents, ensure pytesseract is installed"
+            "- For scanned documents, ensure pytesseract and Tesseract "
+            "are installed on the server"
         )
 
 # ---------------------------------------------------------------------------
@@ -265,7 +293,8 @@ if uploaded_file is not None:
 st.divider()
 st.markdown(
     "<div style='text-align: center; color: #888; font-size: 0.8rem;'>"
-    "COA Translator v1.0 | Pharmaceutical glossary with 200+ terms | "
+    "COA Translator v2.0 | Fixed-structure output | "
+    "Pharmaceutical glossary with 200+ terms | "
     "Powered by OpenAI"
     "</div>",
     unsafe_allow_html=True,

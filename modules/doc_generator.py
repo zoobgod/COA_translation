@@ -1,26 +1,77 @@
 """
 Word document generation module.
 
-Creates a formatted Russian-language COA Word document from translated text,
-using a pre-prepared docx template via docxtpl, or building one from scratch
-with python-docx if no template is available.
+Creates a formatted Russian-language COA Word document with a **fixed
+predefined structure**. Each output document always contains the same
+sections in the same order, regardless of the original PDF layout.
+
+Supports two modes:
+    1. **User-uploaded template** — a .docx file that contains Jinja2
+       placeholders (e.g. ``{{ product_name }}``, ``{{ test_results }}``).
+       Rendered via docxtpl.
+    2. **Built-in fixed structure** — generated from scratch via python-docx
+       using the section definitions in ``coa_structure.py``.
 """
 
 import io
 import logging
 import os
-import re
 from datetime import datetime
 
 from docx import Document
-from docx.shared import Pt, Inches, RGBColor
+from docx.shared import Pt, Inches, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
 from docxtpl import DocxTemplate
+
+from modules.coa_structure import (
+    COA_SECTIONS,
+    COA_FIELD_KEYS,
+    COA_FIELD_LABELS,
+    COA_FIELD_IS_TABLE,
+)
 
 logger = logging.getLogger(__name__)
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
-TEMPLATE_PATH = os.path.join(TEMPLATE_DIR, "coa_template.docx")
+
+
+# =========================================================================
+# Public API
+# =========================================================================
+
+def generate_structured_doc(
+    sections: dict,
+    original_filename: str,
+    extraction_method: str,
+    model_used: str,
+    user_template_bytes: bytes | None = None,
+) -> bytes:
+    """
+    Generate a Word document from structured (section-keyed) translation data.
+
+    Args:
+        sections: dict mapping COA field keys → translated Russian content.
+                  Table fields contain list[list[str]].
+        original_filename: Name of the source PDF.
+        extraction_method: Which extraction method produced the source text.
+        model_used: OpenAI model used for the translation.
+        user_template_bytes: Optional .docx template uploaded by the user.
+                             Must contain Jinja2 placeholders matching the
+                             COA field keys.
+
+    Returns:
+        bytes of the generated .docx file.
+    """
+    if user_template_bytes:
+        return _render_user_template(
+            sections, original_filename, extraction_method, model_used,
+            user_template_bytes,
+        )
+
+    return _generate_fixed_structure(
+        sections, original_filename, extraction_method, model_used,
+    )
 
 
 def generate_doc_from_template(
@@ -30,282 +81,273 @@ def generate_doc_from_template(
     model_used: str,
 ) -> bytes:
     """
-    Generate a Word document using the docxtpl template.
-
-    Args:
-        translated_text: The translated Russian text
-        original_filename: Name of the original PDF file
-        extraction_method: Which PDF extraction method was used
-        model_used: Which OpenAI model was used for translation
-
-    Returns:
-        bytes of the generated .docx file
+    Legacy entry point — builds a fixed-structure document from plain
+    translated text (no section mapping).  All translated content is placed
+    in the "Результаты / Содержание" area.
     """
-    if os.path.exists(TEMPLATE_PATH):
-        return _generate_from_template(
-            translated_text, original_filename, extraction_method, model_used
-        )
-    else:
-        return _generate_from_scratch(
-            translated_text, original_filename, extraction_method, model_used
-        )
+    sections = {k: "" for k in COA_FIELD_KEYS}
+    sections["notes"] = translated_text
+    return _generate_fixed_structure(
+        sections, original_filename, extraction_method, model_used,
+    )
 
 
-def _generate_from_template(
-    translated_text: str,
+# =========================================================================
+# User-uploaded template rendering (docxtpl)
+# =========================================================================
+
+def _render_user_template(
+    sections: dict,
     original_filename: str,
     extraction_method: str,
     model_used: str,
+    template_bytes: bytes,
 ) -> bytes:
-    """Generate document using the docxtpl template."""
-    doc = DocxTemplate(TEMPLATE_PATH)
+    """Render a user-provided .docx template with docxtpl."""
+    doc = DocxTemplate(io.BytesIO(template_bytes))
 
-    # Parse the translated text into sections
-    sections = _parse_translated_sections(translated_text)
+    # Build the context — include every section key plus metadata
+    context = dict(sections)
 
-    context = {
-        "title": "СЕРТИФИКАТ АНАЛИЗА",
-        "subtitle": "Перевод на русский язык",
+    # Flatten table data to a multi-line string for simple {{ }} placeholders
+    for key in COA_FIELD_KEYS:
+        if COA_FIELD_IS_TABLE.get(key) and isinstance(sections.get(key), list):
+            rows = sections[key]
+            context[key] = _table_to_text(rows)
+
+    context.update({
         "original_filename": original_filename,
         "translation_date": datetime.now().strftime("%d.%m.%Y"),
         "model_used": model_used,
         "extraction_method": extraction_method,
-        "translated_content": translated_text,
-        "sections": sections,
-    }
+    })
 
     doc.render(context)
 
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer.getvalue()
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
 
 
-def _generate_from_scratch(
-    translated_text: str,
+# =========================================================================
+# Built-in fixed-structure generation (python-docx)
+# =========================================================================
+
+def _generate_fixed_structure(
+    sections: dict,
     original_filename: str,
     extraction_method: str,
     model_used: str,
 ) -> bytes:
-    """Generate a formatted Word document from scratch using python-docx."""
+    """Build a professionally formatted COA document from scratch."""
     doc = Document()
 
-    # Configure default font
+    # -- Default style -----------------------------------------------------
     style = doc.styles["Normal"]
-    font = style.font
-    font.name = "Times New Roman"
-    font.size = Pt(11)
+    style.font.name = "Times New Roman"
+    style.font.size = Pt(11)
+    style.paragraph_format.space_after = Pt(4)
 
-    # Configure page margins
+    # -- Page margins ------------------------------------------------------
     for section in doc.sections:
-        section.top_margin = Inches(0.8)
-        section.bottom_margin = Inches(0.8)
-        section.left_margin = Inches(1.0)
-        section.right_margin = Inches(0.8)
+        section.top_margin = Cm(2.0)
+        section.bottom_margin = Cm(2.0)
+        section.left_margin = Cm(2.5)
+        section.right_margin = Cm(1.5)
 
-    # --- Title ---
-    title_para = doc.add_paragraph()
-    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_run = title_para.add_run("СЕРТИФИКАТ АНАЛИЗА")
-    title_run.bold = True
-    title_run.font.size = Pt(16)
-    title_run.font.name = "Times New Roman"
+    # -- Title block -------------------------------------------------------
+    _add_title_block(doc)
 
-    # --- Subtitle ---
-    subtitle_para = doc.add_paragraph()
-    subtitle_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    sub_run = subtitle_para.add_run("(Перевод на русский язык)")
-    sub_run.font.size = Pt(12)
-    sub_run.font.name = "Times New Roman"
-    sub_run.font.color.rgb = RGBColor(100, 100, 100)
+    # -- Metadata block ----------------------------------------------------
+    _add_metadata_block(doc, original_filename, extraction_method, model_used)
 
-    # --- Metadata ---
-    doc.add_paragraph()  # spacer
-    meta_para = doc.add_paragraph()
-    meta_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    # -- Horizontal rule ---------------------------------------------------
+    _add_horizontal_rule(doc)
 
-    meta_items = [
+    # -- Fixed sections, in order ------------------------------------------
+    for key, label, _desc, is_table in COA_SECTIONS:
+        value = sections.get(key, "")
+
+        # Skip completely empty sections (except test_results which is core)
+        if not value and key != "test_results":
+            continue
+
+        # Section heading
+        _add_section_heading(doc, label)
+
+        if is_table and isinstance(value, list) and len(value) > 0:
+            _add_results_table(doc, value)
+        elif is_table and isinstance(value, str) and value.strip():
+            # Fallback: table came back as text (pipe-delimited)
+            _add_text_paragraph(doc, value)
+        elif isinstance(value, str) and value.strip():
+            _add_text_paragraph(doc, value)
+        else:
+            # Empty placeholder
+            _add_text_paragraph(doc, "—")
+
+    # -- Footer rule -------------------------------------------------------
+    _add_horizontal_rule(doc)
+
+    # -- Disclaimer --------------------------------------------------------
+    _add_disclaimer(doc)
+
+    # -- Serialise ---------------------------------------------------------
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# =========================================================================
+# Formatting helpers
+# =========================================================================
+
+def _add_title_block(doc: Document):
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(2)
+    run = p.add_run("СЕРТИФИКАТ АНАЛИЗА")
+    run.bold = True
+    run.font.size = Pt(16)
+    run.font.name = "Times New Roman"
+
+    sub = doc.add_paragraph()
+    sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    sub.paragraph_format.space_after = Pt(8)
+    r = sub.add_run("(Перевод на русский язык)")
+    r.font.size = Pt(11)
+    r.font.name = "Times New Roman"
+    r.font.color.rgb = RGBColor(100, 100, 100)
+
+
+def _add_metadata_block(
+    doc: Document,
+    original_filename: str,
+    extraction_method: str,
+    model_used: str,
+):
+    items = [
         ("Исходный файл:", original_filename),
         ("Дата перевода:", datetime.now().strftime("%d.%m.%Y")),
         ("Модель перевода:", model_used),
         ("Метод извлечения:", extraction_method),
     ]
-
-    for label, value in meta_items:
+    for label, value in items:
         p = doc.add_paragraph()
-        label_run = p.add_run(label + " ")
-        label_run.bold = True
-        label_run.font.size = Pt(9)
-        label_run.font.name = "Times New Roman"
-        label_run.font.color.rgb = RGBColor(80, 80, 80)
-        value_run = p.add_run(value)
-        value_run.font.size = Pt(9)
-        value_run.font.name = "Times New Roman"
-        value_run.font.color.rgb = RGBColor(80, 80, 80)
-
-    # --- Divider ---
-    divider = doc.add_paragraph()
-    divider.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    div_run = divider.add_run("─" * 60)
-    div_run.font.size = Pt(8)
-    div_run.font.color.rgb = RGBColor(180, 180, 180)
-
-    # --- Translated Content ---
-    _add_translated_content(doc, translated_text)
-
-    # --- Footer divider ---
-    doc.add_paragraph()
-    divider2 = doc.add_paragraph()
-    divider2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    div_run2 = divider2.add_run("─" * 60)
-    div_run2.font.size = Pt(8)
-    div_run2.font.color.rgb = RGBColor(180, 180, 180)
-
-    # --- Disclaimer ---
-    disclaimer = doc.add_paragraph()
-    disclaimer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    disc_run = disclaimer.add_run(
-        "Данный документ является переводом оригинального Сертификата анализа.\n"
-        "Перевод выполнен с использованием искусственного интеллекта с применением\n"
-        "фармацевтического глоссария. Рекомендуется верификация специалистом."
-    )
-    disc_run.font.size = Pt(8)
-    disc_run.font.name = "Times New Roman"
-    disc_run.font.color.rgb = RGBColor(140, 140, 140)
-    disc_run.italic = True
-
-    # Save to bytes
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer.getvalue()
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(1)
+        lr = p.add_run(f"{label} ")
+        lr.bold = True
+        lr.font.size = Pt(9)
+        lr.font.name = "Times New Roman"
+        lr.font.color.rgb = RGBColor(80, 80, 80)
+        vr = p.add_run(value)
+        vr.font.size = Pt(9)
+        vr.font.name = "Times New Roman"
+        vr.font.color.rgb = RGBColor(80, 80, 80)
 
 
-def _add_translated_content(doc: Document, translated_text: str):
-    """
-    Parse the translated text and add it to the document with
-    appropriate formatting for headers, tables, and body text.
-    """
-    lines = translated_text.split("\n")
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
+def _add_horizontal_rule(doc: Document):
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_before = Pt(4)
+    p.paragraph_format.space_after = Pt(4)
+    run = p.add_run("─" * 70)
+    run.font.size = Pt(7)
+    run.font.color.rgb = RGBColor(180, 180, 180)
 
+
+def _add_section_heading(doc: Document, label: str):
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(10)
+    p.paragraph_format.space_after = Pt(4)
+    run = p.add_run(label)
+    run.bold = True
+    run.font.size = Pt(12)
+    run.font.name = "Times New Roman"
+    run.font.color.rgb = RGBColor(30, 30, 30)
+
+
+def _add_text_paragraph(doc: Document, text: str):
+    """Add one or more paragraphs from a multiline string."""
+    for line in text.split("\n"):
+        line = line.strip()
         if not line:
-            i += 1
             continue
-
-        # Detect page separators
-        if re.match(r"^---\s*(Страница|Page)\s*\d+", line, re.IGNORECASE):
-            page_para = doc.add_paragraph()
-            page_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            page_run = page_para.add_run(line.strip("- "))
-            page_run.font.size = Pt(9)
-            page_run.font.color.rgb = RGBColor(120, 120, 120)
-            page_run.italic = True
-            i += 1
-            continue
-
-        # Detect table rows (lines with | separator)
-        if "|" in line and _looks_like_table_row(line):
-            table_rows = []
-            while i < len(lines) and "|" in lines[i] and _looks_like_table_row(lines[i]):
-                cells = [c.strip() for c in lines[i].split("|") if c.strip()]
-                table_rows.append(cells)
-                i += 1
-
-            if table_rows:
-                _add_table(doc, table_rows)
-            continue
-
-        # Detect section headers (all caps or short bold-looking lines)
-        if _is_section_header(line):
-            heading = doc.add_heading(level=2)
-            heading_run = heading.add_run(line)
-            heading_run.font.name = "Times New Roman"
-            heading_run.font.size = Pt(12)
-            i += 1
-            continue
-
-        # Regular text paragraph
-        para = doc.add_paragraph()
-        run = para.add_run(line)
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(1)
+        p.paragraph_format.space_after = Pt(1)
+        run = p.add_run(line)
         run.font.name = "Times New Roman"
         run.font.size = Pt(11)
-        i += 1
 
 
-def _looks_like_table_row(line: str) -> bool:
-    """Check if a line looks like a table row."""
-    parts = line.split("|")
-    return len(parts) >= 2
+def _add_results_table(doc: Document, rows: list[list]):
+    """
+    Add the test-results table to the document.
 
-
-def _is_section_header(line: str) -> bool:
-    """Heuristic to detect section headers."""
-    stripped = line.strip(":-= ")
-    if not stripped:
-        return False
-    # All uppercase and relatively short
-    if stripped.isupper() and len(stripped) < 80:
-        return True
-    # Common header patterns
-    if re.match(r"^\d+\.\s+[А-ЯA-Z]", stripped):
-        return True
-    return False
-
-
-def _add_table(doc: Document, rows: list):
-    """Add a formatted table to the document."""
+    *rows* is a list of lists (first row = header).
+    """
     if not rows:
+        _add_text_paragraph(doc, "—")
         return
 
-    max_cols = max(len(row) for row in rows)
+    n_cols = max(len(r) for r in rows)
 
-    # Normalize rows to have the same number of columns
+    # Normalise each row to n_cols
     for row in rows:
-        while len(row) < max_cols:
+        while len(row) < n_cols:
             row.append("")
 
-    table = doc.add_table(rows=len(rows), cols=max_cols)
+    table = doc.add_table(rows=len(rows), cols=n_cols)
     table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
     for i, row_data in enumerate(rows):
-        for j, cell_text in enumerate(row_data):
+        for j, cell_val in enumerate(row_data):
             cell = table.cell(i, j)
-            cell.text = cell_text
+            cell.text = str(cell_val) if cell_val else ""
 
-            # Format cell text
             for paragraph in cell.paragraphs:
+                paragraph.paragraph_format.space_before = Pt(2)
+                paragraph.paragraph_format.space_after = Pt(2)
                 for run in paragraph.runs:
                     run.font.name = "Times New Roman"
                     run.font.size = Pt(10)
 
-            # Bold the header row
+            # Header row formatting
             if i == 0:
                 for paragraph in cell.paragraphs:
+                    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     for run in paragraph.runs:
                         run.bold = True
+                        run.font.size = Pt(10)
 
-    doc.add_paragraph()  # spacer after table
+    # Spacer after table
+    doc.add_paragraph()
 
 
-def _parse_translated_sections(text: str) -> list[dict]:
-    """Parse translated text into sections for template rendering."""
-    sections = []
-    current_section = {"title": "", "content": ""}
+def _add_disclaimer(doc: Document):
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_before = Pt(4)
+    run = p.add_run(
+        "Данный документ является переводом оригинального Сертификата анализа.\n"
+        "Перевод выполнен с использованием искусственного интеллекта с применением\n"
+        "фармацевтического глоссария. Рекомендуется верификация специалистом."
+    )
+    run.font.size = Pt(8)
+    run.font.name = "Times New Roman"
+    run.font.color.rgb = RGBColor(140, 140, 140)
+    run.italic = True
 
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if _is_section_header(stripped) and stripped:
-            if current_section["content"].strip():
-                sections.append(current_section)
-            current_section = {"title": stripped, "content": ""}
-        else:
-            current_section["content"] += line + "\n"
 
-    if current_section["content"].strip() or current_section["title"]:
-        sections.append(current_section)
-
-    return sections
+def _table_to_text(rows: list[list]) -> str:
+    """Convert a table (list of rows) to pipe-delimited text."""
+    lines = []
+    for row in rows:
+        lines.append(" | ".join(str(c) for c in row))
+    return "\n".join(lines)

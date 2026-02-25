@@ -6,8 +6,11 @@ Streamlit application that translates pharmaceutical Certificate of Analysis (CO
 
 - **PDF Upload** — Upload COA documents in PDF format
 - **Multi-method text extraction** — Uses pdfplumber (primary), PyMuPDF (fallback), and OCR via pytesseract (for scanned documents)
+- **Optimized OCR pipeline** — Image preprocessing (grayscale, autocontrast, sharpening, binarization) with tuned Tesseract settings (PSM 6 for structured documents) and pdfplumber-based rendering fallback when PyMuPDF is unavailable
 - **AI Translation with pharma glossary** — Translates via OpenAI models with a 200+ term pharmaceutical glossary enforcing standard Russian pharmaceutical terminology
-- **Formatted Word output** — Generates a professionally formatted `.docx` file with the translated content
+- **Structured JSON translation** — OpenAI outputs a structured JSON response mapping content to predefined COA sections, ensuring consistent document layout
+- **Fixed-structure Word output** — Every output document follows the same 10-section predefined structure regardless of the original PDF layout
+- **Custom template support** — Optionally upload your own `.docx` template with Jinja2 placeholders for custom formatting
 - **Download** — One-click download of the translated document
 
 ## Setup
@@ -42,7 +45,7 @@ A pre-prepared Word template can be generated for docxtpl-based rendering:
 python -m modules.create_template
 ```
 
-If the template is not present, the app falls back to generating documents from scratch using python-docx.
+If the template is not provided by the user, the app generates documents using the built-in fixed structure.
 
 ## Running the App
 
@@ -56,10 +59,40 @@ Then open the URL shown in the terminal (typically `http://localhost:8501`).
 
 1. Enter your OpenAI API key in the sidebar
 2. Select a translation model (gpt-4o recommended for best quality)
-3. Upload a COA PDF file
-4. Review the extracted text
-5. Click **Translate to Russian**
-6. Download the translated `.docx` file
+3. (Optional) Upload a custom `.docx` structure template in the sidebar
+4. Upload a COA PDF file
+5. Review the extracted text
+6. Click **Translate to Russian**
+7. Download the translated `.docx` file
+
+## Fixed COA Document Structure
+
+Every output document contains these sections in order:
+
+| # | Section Key | Russian Label |
+|---|-------------|---------------|
+| 1 | `document_title` | Наименование документа |
+| 2 | `company_info` | Информация о компании |
+| 3 | `product_name` | Наименование продукта |
+| 4 | `product_details` | Сведения о продукте |
+| 5 | `batch_info` | Информация о серии |
+| 6 | `storage_conditions` | Условия хранения |
+| 7 | `test_results` | Результаты испытаний |
+| 8 | `conclusion` | Заключение |
+| 9 | `signatures` | Подписи |
+| 10 | `notes` | Примечания |
+
+The `test_results` section is rendered as a formatted table; all others are text paragraphs.
+
+## Custom Templates
+
+Upload a `.docx` file containing Jinja2 placeholders (e.g. `{{ product_name }}`, `{{ test_results }}`). Available placeholders:
+
+- All 10 section keys from the table above
+- `original_filename` — source PDF filename
+- `translation_date` — date of translation
+- `model_used` — OpenAI model used
+- `extraction_method` — PDF extraction method used
 
 ## Project Structure
 
@@ -71,17 +104,28 @@ Then open the URL shown in the terminal (typically `http://localhost:8501`).
 ├── modules/
 │   ├── __init__.py
 │   ├── glossary.py           # Pharmaceutical EN→RU glossary (200+ terms)
+│   ├── coa_structure.py      # Fixed COA section definitions
 │   ├── pdf_extractor.py      # PDF text extraction (pdfplumber, PyMuPDF, OCR)
-│   ├── translator.py         # OpenAI translation with pharma context
-│   ├── doc_generator.py      # Word document generation
-│   └── create_template.py    # Script to generate the docxtpl template
+│   ├── translator.py         # OpenAI translation (plain + structured JSON)
+│   ├── doc_generator.py      # Word document generation (fixed structure)
+│   └── create_template.py    # Script to generate a sample docxtpl template
 └── templates/
-    └── coa_template.docx     # Generated Word template (created by create_template.py)
+    └── coa_template.docx     # Sample template (created by create_template.py)
 ```
+
+## OCR Pipeline
+
+The OCR system is designed for scanned pharmaceutical COA documents:
+
+1. **Page rendering** — PyMuPDF at 300 DPI (preferred), or pdfplumber `page.to_image()` as fallback
+2. **Image preprocessing** — Grayscale → upscale (if small) → autocontrast → sharpen → binarize
+3. **Tesseract OCR** — PSM 6 (single uniform block, good for forms/tables), OEM 3 (LSTM engine)
+4. **Quality gate** — Pages with fewer than 10 alphanumeric characters are rejected
+5. **Dual-pass** — If preprocessed OCR fails, a second pass without preprocessing is attempted
 
 ## Glossary
 
-The pharmaceutical glossary (`modules/glossary.py`) includes standard translations for:
+The pharmaceutical glossary (`modules/glossary.py`) includes 246 standard translations for:
 
 - Document headers and metadata fields
 - Physical and chemical test parameters
